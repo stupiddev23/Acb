@@ -2,6 +2,12 @@ const fs = require("fs");
 const mineflayer = require("mineflayer");
 const { pathfinder, Movements } = require("mineflayer-pathfinder");
 const mcDataLoader = require("minecraft-data");
+const {
+  webSearch,
+  shouldSearchPrompt,
+  buildSearchQuery,
+  formatSearchContext,
+} = require("./websearch");
 const config = JSON.parse(fs.readFileSync("./config.json", "utf-8"));
 
 const pass = config.password; // Password for your bot
@@ -28,6 +34,18 @@ const MAX_CONTINUATIONS = config.MAX_CONTINUATIONS; // Max continues for the spe
 const RECONNECT_DELAY = config.RECONNECT_DELAY; // Delay of reconnecting
 const COOLDOWN_SWEEP_MS = 60 * 60 * 1000;
 const AI_PREFIX = config.AI_PREFIX; // Prefix for the ai
+
+// Web search settings, see websearch.js for the supported providers
+const WEB_SEARCH = config.WEB_SEARCH !== false; // Set to false to disable internet lookups
+const SEARCH_MODE = String(config.SEARCH_MODE || "auto").toLowerCase(); // auto | always | off
+const SEARCH_PROVIDER = String(config.SEARCH_PROVIDER || "duckduckgo").toLowerCase();
+const SEARCH_API_KEY = config.SEARCH_API_KEY || ""; // Only needed for brave / tavily
+const SEARCH_URL = config.SEARCH_URL || ""; // Only needed for your own searxng instance
+const SEARCH_MAX_RESULTS = Number(config.SEARCH_MAX_RESULTS) || 4;
+const SEARCH_MAX_CHARS = Number(config.SEARCH_MAX_CHARS) || 900;
+const SEARCH_TIMEOUT = Number(config.SEARCH_TIMEOUT) || 8000;
+const AI_NUM_PREDICT = Number(config.AI_NUM_PREDICT) || 55; // Max tokens of a normal reply
+const SEARCH_NUM_PREDICT = Number(config.SEARCH_NUM_PREDICT) || 110; // Max tokens when answering with search results
 
 
 const cooldowns = new Map();
@@ -165,7 +183,48 @@ function getHistory(username) {
   return conversations.get(username);
 }
 
-async function ollamaChat(history) {
+// Looks the prompt up online when it asks about something current or asks for a search.
+// Returns a system message with the results, or null when no search is needed.
+async function buildSearchContext(prompt) {
+  if (!WEB_SEARCH || SEARCH_MODE === "off") return null;
+
+  if (!shouldSearchPrompt(prompt, SEARCH_MODE)) return null;
+
+  const query = buildSearchQuery(prompt);
+
+  if (!query) return null;
+
+  try {
+    const result = await webSearch(query, {
+      provider: SEARCH_PROVIDER,
+      apiKey: SEARCH_API_KEY,
+      url: SEARCH_URL,
+      limit: SEARCH_MAX_RESULTS,
+      timeout: SEARCH_TIMEOUT,
+    });
+
+    console.log(
+      `[SEARCH] "${query}" -> ${result.results.length} results via ${result.provider}`
+    );
+
+    return formatSearchContext(result, SEARCH_MAX_CHARS);
+  } catch (error) {
+    console.error("[SEARCH ERROR]", error.message || error);
+
+    return null;
+  }
+}
+
+async function ollamaChat(history, extraSystem, numPredict = AI_NUM_PREDICT) {
+  // The search results are only sent to the model, they are never stored in history
+  const messages = extraSystem
+    ? [
+        ...(history[0] && history[0].role === "system" ? [history[0]] : []),
+        { role: "system", content: extraSystem },
+        ...(history[0] && history[0].role === "system" ? history.slice(1) : history),
+      ]
+    : history;
+
   const response = await fetch(OLLAMA_URL, {
     method: "POST",
     headers: {
@@ -173,12 +232,12 @@ async function ollamaChat(history) {
     },
     body: JSON.stringify({
       model: AI_MODEL,
-      messages: history,
+      messages,
       stream: false,
       think: false,
       options: {
         temperature: 0.7,
-        num_predict: 55,
+        num_predict: numPredict,
       },
     }),
   });
@@ -211,6 +270,10 @@ async function ollamaChat(history) {
 async function askAI(username, prompt) {
   const history = getHistory(username);
 
+  // Search before answering so current information reaches the model
+  const searchContext = await buildSearchContext(prompt);
+  const numPredict = searchContext ? SEARCH_NUM_PREDICT : AI_NUM_PREDICT;
+
   history.push({
     role: "user",
     content: prompt,
@@ -228,7 +291,7 @@ async function askAI(username, prompt) {
   let continuationCount = 0;
 
   while (true) {
-    const result = await ollamaChat(history);
+    const result = await ollamaChat(history, searchContext, numPredict);
 
     completeAnswer += (completeAnswer ? " " : "") + result.answer;
 
