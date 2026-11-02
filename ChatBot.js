@@ -8,6 +8,7 @@ const {
   buildSearchQuery,
   formatSearchContext,
 } = require("./websearch");
+const { askFreeAI, looksUnsure } = require("./freeai");
 const config = JSON.parse(fs.readFileSync("./config.json", "utf-8"));
 
 const pass = config.password; // Password for your bot
@@ -39,13 +40,20 @@ const AI_PREFIX = config.AI_PREFIX; // Prefix for the ai
 const WEB_SEARCH = config.WEB_SEARCH !== false; // Set to false to disable internet lookups
 const SEARCH_MODE = String(config.SEARCH_MODE || "auto").toLowerCase(); // auto | always | off
 const SEARCH_PROVIDER = String(config.SEARCH_PROVIDER || "duckduckgo").toLowerCase();
-const SEARCH_API_KEY = config.SEARCH_API_KEY || ""; // Only needed for brave / tavily
 const SEARCH_URL = config.SEARCH_URL || ""; // Only needed for your own searxng instance
 const SEARCH_MAX_RESULTS = Number(config.SEARCH_MAX_RESULTS) || 4;
 const SEARCH_MAX_CHARS = Number(config.SEARCH_MAX_CHARS) || 900;
 const SEARCH_TIMEOUT = Number(config.SEARCH_TIMEOUT) || 8000;
 const AI_NUM_PREDICT = Number(config.AI_NUM_PREDICT) || 55; // Max tokens of a normal reply
 const SEARCH_NUM_PREDICT = Number(config.SEARCH_NUM_PREDICT) || 110; // Max tokens when answering with search results
+
+// Free hosted AI, used only when Ollama fails or says it does not know
+const FREE_AI_FALLBACK = config.FREE_AI_FALLBACK !== false;
+const FREE_AI_URL = config.FREE_AI_URL || "https://text.pollinations.ai/openai";
+const FREE_AI_MODEL = config.FREE_AI_MODEL || "openai";
+const FREE_AI_TIMEOUT = Number(config.FREE_AI_TIMEOUT) || 20000;
+const FREE_AI_MAX_CHARS = Number(config.FREE_AI_MAX_CHARS) || 400;
+const FREE_AI_COOLDOWN = Number(config.FREE_AI_COOLDOWN) || 45000;
 
 
 const cooldowns = new Map();
@@ -197,7 +205,6 @@ async function buildSearchContext(prompt) {
   try {
     const result = await webSearch(query, {
       provider: SEARCH_PROVIDER,
-      apiKey: SEARCH_API_KEY,
       url: SEARCH_URL,
       limit: SEARCH_MAX_RESULTS,
       timeout: SEARCH_TIMEOUT,
@@ -267,6 +274,45 @@ async function ollamaChat(history, extraSystem, numPredict = AI_NUM_PREDICT) {
   };
 }
 
+// Replaces the last assistant turn so a fallback answer is what the player
+// remembers next time, instead of the model's "I don't know".
+function setLastAssistant(history, content) {
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].role === "assistant") {
+      history[i].content = content;
+      return;
+    }
+  }
+
+  history.push({ role: "assistant", content });
+}
+
+async function askFallbackAI(history, prompt, searchContext) {
+  if (!FREE_AI_FALLBACK) return null;
+
+  try {
+    const answer = await askFreeAI({
+      system: MommyPrompt,
+      context: searchContext,
+      question: prompt,
+      history: history.slice(1, -1),
+      url: FREE_AI_URL,
+      model: FREE_AI_MODEL,
+      timeout: FREE_AI_TIMEOUT,
+      maxChars: FREE_AI_MAX_CHARS,
+      cooldown: FREE_AI_COOLDOWN,
+    });
+
+    console.log(`[FREE AI] ${answer}`);
+
+    return answer;
+  } catch (error) {
+    console.error("[FREE AI ERROR]", error.message || error);
+
+    return null;
+  }
+}
+
 async function askAI(username, prompt) {
   const history = getHistory(username);
 
@@ -289,9 +335,18 @@ async function askAI(username, prompt) {
 
   let completeAnswer = "";
   let continuationCount = 0;
+  let ollamaFailed = false;
 
   while (true) {
-    const result = await ollamaChat(history, searchContext, numPredict);
+    let result;
+
+    try {
+      result = await ollamaChat(history, searchContext, numPredict);
+    } catch (error) {
+      console.error("[OLLAMA ERROR]", error.message || error);
+      ollamaFailed = true;
+      break;
+    }
 
     completeAnswer += (completeAnswer ? " " : "") + result.answer;
 
@@ -340,7 +395,31 @@ async function askAI(username, prompt) {
     history.push(...trimmed);
   }
 
-  return completeAnswer.trim();
+  // Ollama is down or threw: try the free hosted model before giving up
+  if (ollamaFailed) {
+    const fallback = await askFallbackAI(history, prompt, searchContext);
+
+    if (fallback) {
+      setLastAssistant(history, fallback);
+      return fallback;
+    }
+
+    throw new Error("Ollama failed and the free AI fallback did not answer");
+  }
+
+  const answer = completeAnswer.trim();
+
+  // The local model admitted it does not know: let the free model try
+  if (looksUnsure(answer)) {
+    const fallback = await askFallbackAI(history, prompt, searchContext);
+
+    if (fallback) {
+      setLastAssistant(history, fallback);
+      return fallback;
+    }
+  }
+
+  return answer;
 }
 
 function scheduleReconnect(reason) {

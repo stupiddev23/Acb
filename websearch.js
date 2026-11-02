@@ -8,8 +8,8 @@
 //   "bing"        - Bing RSS feed, no API key needed
 //   "wikipedia"   - Wikipedia search API, no API key needed
 //   "searxng"     - your own SearXNG instance with format=json enabled (SEARCH_URL)
-//   "brave"       - Brave Search API (SEARCH_API_KEY)
-//   "tavily"      - Tavily Search API (SEARCH_API_KEY)
+//
+// Every provider here works without an API key or an account.
 
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36";
@@ -366,77 +366,11 @@ async function searchSearxng(query, { limit, timeout, url }) {
   return results;
 }
 
-async function searchBrave(query, { limit, timeout, apiKey }) {
-  if (!apiKey) throw new Error("SEARCH_API_KEY is required for the brave provider");
-
-  const url =
-    `https://api.search.brave.com/res/v1/web/search?count=${Math.max(1, limit)}` +
-    `&q=${encodeURIComponent(query)}`;
-
-  const data = await fetchJson(
-    url,
-    {
-      headers: {
-        accept: "application/json",
-        "x-subscription-token": apiKey,
-      },
-    },
-    timeout
-  );
-
-  const results = normalizeResults(
-    ((data.web && data.web.results) || []).map((item) => ({
-      title: item.title,
-      snippet: item.description,
-      url: item.url,
-    })),
-    limit
-  );
-
-  if (!results.length) throw new Error("Brave returned no usable results");
-
-  return results;
-}
-
-async function searchTavily(query, { limit, timeout, apiKey }) {
-  if (!apiKey) throw new Error("SEARCH_API_KEY is required for the tavily provider");
-
-  const data = await fetchJson(
-    "https://api.tavily.com/search",
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        api_key: apiKey,
-        query,
-        max_results: Math.max(1, limit),
-        search_depth: "basic",
-      }),
-    },
-    timeout
-  );
-
-  const results = normalizeResults(
-    (data.results || []).map((item) => ({
-      title: item.title,
-      snippet: item.content,
-      url: item.url,
-    })),
-    limit
-  );
-
-  if (!results.length) throw new Error("Tavily returned no usable results");
-
-  return results;
-}
-
 const PROVIDERS = {
   duckduckgo: searchDuckDuckGo,
   bing: searchBing,
   wikipedia: searchWikipedia,
   searxng: searchSearxng,
-  brave: searchBrave,
-  tavily: searchTavily,
 };
 
 const FALLBACK_CHAIN = ["duckduckgo", "bing", "wikipedia"];
@@ -478,7 +412,6 @@ async function webSearch(query, options = {}) {
   const settings = {
     limit: Number(options.limit) || 4,
     timeout: totalTimeout,
-    apiKey: options.apiKey || "",
     url: options.url || "",
   };
 

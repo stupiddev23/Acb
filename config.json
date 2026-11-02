@@ -15,11 +15,16 @@
  "WEB_SEARCH": true,
  "SEARCH_MODE": "auto",
  "SEARCH_PROVIDER": "duckduckgo",
- "SEARCH_API_KEY": "",
  "SEARCH_URL": "",
  "SEARCH_MAX_RESULTS": 4,
  "SEARCH_MAX_CHARS": 900,
  "SEARCH_TIMEOUT": 8000,
  "AI_NUM_PREDICT": 55,
- "SEARCH_NUM_PREDICT": 110
+ "SEARCH_NUM_PREDICT": 110,
+ "FREE_AI_FALLBACK": true,
+ "FREE_AI_URL": "https://text.pollinations.ai/openai",
+ "FREE_AI_MODEL": "openai",
+ "FREE_AI_TIMEOUT": 20000,
+ "FREE_AI_MAX_CHARS": 400,
+ "FREE_AI_COOLDOWN": 45000
 }
